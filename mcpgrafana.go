@@ -326,6 +326,11 @@ type GrafanaConfig struct {
 	// opaque RoundTripper.
 	SOCKS5ProxyURL string
 
+	// DashboardSchema, when "v2", makes update_dashboard reject classic v1
+	// bodies that would create a new dashboard on a Grafana serving schema v2.
+	// Empty (the default) accepts either schema.
+	DashboardSchema string
+
 	// MaxLokiLogLimit is the maximum number of log lines that can be returned
 	// from Loki queries.
 	MaxLokiLogLimit int

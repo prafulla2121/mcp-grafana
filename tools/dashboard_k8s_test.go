@@ -741,3 +741,56 @@ func TestCreateOrUpdateDashboardV2_V2CheckErrorRefuses(t *testing.T) {
 	assert.NotContains(t, err.Error(), "stored as classic v1")
 	assert.Empty(t, writes)
 }
+
+// TestRejectNewV1Dashboard verifies --dashboard-schema=v2 refuses only v1
+// bodies that would create a new dashboard on a v2-serving Grafana (#1276).
+func TestRejectNewV1Dashboard(t *testing.T) {
+	newServer := func(versions ...string) *httptest.Server {
+		return httptest.NewServer(withFrontendSettings("default", func(w http.ResponseWriter, r *http.Request) {
+			if serveDashboardDiscovery(w, r, versions...) {
+				return
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dashboards/classic") {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"apiVersion": "dashboard.grafana.app/v1beta1",
+					"metadata":   map[string]interface{}{"name": "classic"},
+					"spec":       map[string]interface{}{"title": "c", "panels": []interface{}{}},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+	}
+	ctxFor := func(ts *httptest.Server, schema string) context.Context {
+		ctx := mcpgrafana.WithGrafanaConfig(context.Background(), mcpgrafana.GrafanaConfig{URL: ts.URL, DashboardSchema: schema})
+		return mcpgrafana.WithKubernetesClient(ctx, &mcpgrafana.KubernetesClient{BaseURL: ts.URL, HTTPClient: ts.Client()})
+	}
+	v1New := map[string]interface{}{"title": "new", "panels": []interface{}{}}
+
+	ts := newServer("v1beta1", "v2beta1")
+	defer ts.Close()
+	ctx := ctxFor(ts, "v2")
+
+	err := rejectNewV1Dashboard(ctx, v1New)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "schema v2")
+	assert.Contains(t, err.Error(), dashboardV2Skeleton, "error should carry the v2 skeleton so the agent can retry")
+
+	err = rejectNewV1Dashboard(ctx, map[string]interface{}{"uid": "missing", "panels": []interface{}{}})
+	require.Error(t, err, "a v1 body for a uid that doesn't exist yet creates a dashboard")
+	assert.Contains(t, err.Error(), "schema v2")
+
+	assert.NoError(t, rejectNewV1Dashboard(ctx, map[string]interface{}{"uid": "classic", "panels": []interface{}{}}), "existing v1 dashboards stay editable as v1")
+	assert.NoError(t, rejectNewV1Dashboard(ctx, map[string]interface{}{"title": "v2", "elements": map[string]interface{}{}}), "v2 bodies are allowed")
+	assert.NoError(t, rejectNewV1Dashboard(ctxFor(ts, ""), v1New), "off by default")
+
+	noV2 := newServer("v0alpha1", "v1beta1")
+	defer noV2.Close()
+	assert.NoError(t, rejectNewV1Dashboard(ctxFor(noV2, "v2"), v1New), "no enforcement when Grafana doesn't serve v2")
+
+	// End to end: the rejection happens before any write.
+	_, err = updateDashboard(ctx, UpdateDashboardParams{Dashboard: v1New})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "schema v2")
+}

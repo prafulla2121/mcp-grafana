@@ -154,6 +154,7 @@ Refer to [Anonymous usage statistics](../../anonymous-usage-statistics/) for the
 - `--loki-guardrail-max-range`: Maximum effective time range for a single `query_loki_logs` call, including range-vector durations. Defaults to `24h`; `0` disables the range check. Falls back to `GRAFANA_LOKI_GUARDRAIL_MAX_RANGE`.
 
 The guardrail's decisions are also exported as OTel counters (`mcp_loki_guardrail_admitted_total`, `_would_block_total`, `_blocked_total`, `_fail_open_total`), which is the recommended way to size the affected population before promoting from `shadow` to `enforce`. See [Observability](../../developer/observability-metrics-and-tracing/#loki-cost-guardrail-metrics).
+- `--dashboard-schema`: Set to `v2` to make `update_dashboard` reject classic v1 bodies that would create a new dashboard when Grafana serves dashboard schema v2; the error includes a v2 skeleton so the agent can retry. Existing dashboards stay editable in their stored schema. Default: empty (either schema).
 - `--dynamic-multi-org`: Allow tool calls to select a Grafana organization per call via an optional `orgId` argument. Off by default. See [Multi-organization support](../multi-organization-and-headers/).
 
 ## Run without query execution

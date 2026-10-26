@@ -414,6 +414,9 @@ func updateDashboardContent(ctx context.Context, args UpdateDashboardParams) (*m
 		if err := rejectV1BodyOverV2Stored(ctx, args.Dashboard); err != nil {
 			return nil, err
 		}
+		if err := rejectNewV1Dashboard(ctx, args.Dashboard); err != nil {
+			return nil, err
+		}
 		return updateDashboardWithFullJSON(ctx, args)
 	} else if args.UID != "" && len(args.Operations) == 0 {
 		return nil, fmt.Errorf("'uid' was provided without 'operations'. To update an existing dashboard, provide both 'uid' and 'operations' (array of patch operations). To replace a dashboard entirely, provide 'dashboard' (full JSON) instead")
@@ -664,6 +667,38 @@ func rejectV1BodyOverV2Stored(ctx context.Context, dashboard map[string]interfac
 		return fmt.Errorf("dashboard %q is stored as %s and cannot be replaced with a classic v1 (panels[]) body: Grafana would down-convert it, dropping v2-only content such as tabs. Use patch operations (uid + operations) against the v2 spec, or send a full v2 body (elements/layout); fetch it with get_dashboard_by_uid to see its current v2 structure", uid, existing.APIVersion)
 	}
 	return nil
+}
+
+// rejectNewV1Dashboard enforces --dashboard-schema=v2: it refuses a classic v1
+// full-JSON body that would create a new dashboard on a Grafana that serves v2.
+// Existing dashboards, of either schema, stay editable as they are stored.
+func rejectNewV1Dashboard(ctx context.Context, dashboard map[string]interface{}) error {
+	if mcpgrafana.GrafanaConfigFromContext(ctx).DashboardSchema != "v2" || isV2DashboardJSON(dashboard) {
+		return nil
+	}
+	k8s := mcpgrafana.KubernetesClientFromContext(ctx)
+	if k8s == nil {
+		return nil
+	}
+	versions, err := k8s.GroupVersions(ctx, dashboardAPIGroup)
+	if err != nil {
+		// ponytail: fail open. This is a schema preference, not a data-loss
+		// guard, and no reachable dashboard API usually means no v2 either.
+		return nil
+	}
+	if preferredV2Version(versions) == "" {
+		return nil
+	}
+	if uid, _ := dashboard["uid"].(string); uid != "" {
+		_, err := fetchDashboardViaK8s(ctx, k8s, uid, false)
+		if err == nil {
+			return nil // existing dashboard: keep its stored schema
+		}
+		if !isK8sNotFound(err) {
+			return fmt.Errorf("check existing dashboard %s: %w", uid, err)
+		}
+	}
+	return fmt.Errorf("this server requires new dashboards to use schema v2 (--dashboard-schema=v2), but the body is classic v1 (panels[]). Resend it as a v2 body with top-level 'elements' and 'layout', for example: %s", dashboardV2Skeleton)
 }
 
 // preferredV2Version picks the most stable, newest v2 version the dashboard API
@@ -918,9 +953,13 @@ var GetDashboardByUID = mcpgrafana.MustTool(
 	mcpgrafana.RequiresPermissions("dashboards:write"),
 )
 
+// dashboardV2Skeleton is a minimal v2 dashboard body, quoted in the
+// update_dashboard description and in the --dashboard-schema=v2 rejection.
+const dashboardV2Skeleton = `{"title":"T","timeSettings":{"from":"now-6h","to":"now"},"variables":[],"elements":{"p1":{"kind":"Panel","spec":{"id":1,"title":"Up","vizConfig":{"kind":"VizConfig","group":"timeseries","spec":{}},"data":{"kind":"QueryGroup","spec":{"queries":[{"kind":"PanelQuery","spec":{"refId":"A","query":{"kind":"DataQuery","group":"prometheus","datasource":{"name":"<ds uid>"},"spec":{"expr":"up"}}}}]}}}}},"layout":{"kind":"GridLayout","spec":{"items":[{"kind":"GridLayoutItem","spec":{"x":0,"y":0,"width":24,"height":8,"element":{"kind":"ElementReference","name":"p1"}}}]}}}`
+
 var UpdateDashboard = mcpgrafana.MustTool(
 	"update_dashboard",
-	"Create or update a dashboard. Returns the saved dashboard UID and dashboard link in the 'url' field, using the instance public URL when available. Two modes: (1) Full JSON — provide 'dashboard' for new dashboards or complete replacements. (2) Patch — provide 'uid' + 'operations' to make targeted changes to an existing dashboard. One of these two modes is required; 'folderUid', 'message', and 'overwrite' are supplementary and do nothing on their own. Dashboard authoring guidance: if a saved query must support one, many, or All values from a multi-select variable inside a regex expression or matcher, save '${var:regex}' rather than plain '$var'. Saved dashboard annotation queries/definitions live in dashboard JSON under 'annotations.list'; annotation events are stored separately and are not part of the dashboard JSON. For stat panels over the current dashboard range, make the query return the range-level result the stat should display; panel-side reduction only reduces returned series and does not compute peak-over-range or ratio-of-peaks semantics for you. Patch operations support JSONPaths like '$.panels[0].targets[0].expr', '$.panels[1].title', '$.panels[2].targets[0].datasource', '$.templating.list/-', and '$.annotations.list/-'. Append to arrays with '/- ' syntax: '$.panels/- '. Remove by index: {\"op\": \"remove\", \"path\": \"$.panels[2]\"}. Multiple removes on the same array are automatically reordered to avoid index-shifting issues. Note: only numeric array indices are supported in patch paths; filter expressions like [?(@.id==2)] and wildcards like [*] are not supported. Schema: prefer v2 for new dashboards; if this Grafana lacks v2 the save fails saying so, then send v1. Keep an existing dashboard in its stored schema (indicated by 'isV2'/'apiVersion' on the fetched dashboard). A body with top-level 'elements'/'layout' is saved as v2. Minimal v2 body: {\"title\":\"T\",\"timeSettings\":{\"from\":\"now-6h\",\"to\":\"now\"},\"variables\":[],\"elements\":{\"p1\":{\"kind\":\"Panel\",\"spec\":{\"id\":1,\"title\":\"Up\",\"vizConfig\":{\"kind\":\"VizConfig\",\"group\":\"timeseries\",\"spec\":{}},\"data\":{\"kind\":\"QueryGroup\",\"spec\":{\"queries\":[{\"kind\":\"PanelQuery\",\"spec\":{\"refId\":\"A\",\"query\":{\"kind\":\"DataQuery\",\"group\":\"prometheus\",\"datasource\":{\"name\":\"<ds uid>\"},\"spec\":{\"expr\":\"up\"}}}}]}}}}},\"layout\":{\"kind\":\"GridLayout\",\"spec\":{\"items\":[{\"kind\":\"GridLayoutItem\",\"spec\":{\"x\":0,\"y\":0,\"width\":24,\"height\":8,\"element\":{\"kind\":\"ElementReference\",\"name\":\"p1\"}}}]}}}. For tabs, layout is {\"kind\":\"TabsLayout\",\"spec\":{\"tabs\":[{\"kind\":\"TabsLayoutTab\",\"spec\":{\"title\":\"A\",\"layout\":<GridLayout>}}]}}.",
+	"Create or update a dashboard. Returns the saved dashboard UID and dashboard link in the 'url' field, using the instance public URL when available. Two modes: (1) Full JSON — provide 'dashboard' for new dashboards or complete replacements. (2) Patch — provide 'uid' + 'operations' to make targeted changes to an existing dashboard. One of these two modes is required; 'folderUid', 'message', and 'overwrite' are supplementary and do nothing on their own. Dashboard authoring guidance: if a saved query must support one, many, or All values from a multi-select variable inside a regex expression or matcher, save '${var:regex}' rather than plain '$var'. Saved dashboard annotation queries/definitions live in dashboard JSON under 'annotations.list'; annotation events are stored separately and are not part of the dashboard JSON. For stat panels over the current dashboard range, make the query return the range-level result the stat should display; panel-side reduction only reduces returned series and does not compute peak-over-range or ratio-of-peaks semantics for you. Patch operations support JSONPaths like '$.panels[0].targets[0].expr', '$.panels[1].title', '$.panels[2].targets[0].datasource', '$.templating.list/-', and '$.annotations.list/-'. Append to arrays with '/- ' syntax: '$.panels/- '. Remove by index: {\"op\": \"remove\", \"path\": \"$.panels[2]\"}. Multiple removes on the same array are automatically reordered to avoid index-shifting issues. Note: only numeric array indices are supported in patch paths; filter expressions like [?(@.id==2)] and wildcards like [*] are not supported. Schema: prefer v2 for new dashboards; if this Grafana lacks v2 the save fails saying so, then send v1. Keep an existing dashboard in its stored schema (indicated by 'isV2'/'apiVersion' on the fetched dashboard). A body with top-level 'elements'/'layout' is saved as v2. Minimal v2 body: " + dashboardV2Skeleton + ". For tabs, layout is {\"kind\":\"TabsLayout\",\"spec\":{\"tabs\":[{\"kind\":\"TabsLayoutTab\",\"spec\":{\"title\":\"A\",\"layout\":<GridLayout>}}]}}.",
 	updateDashboard,
 	mcpgrafana.WithTitleAnnotation("Create or update dashboard"),
 	mcpgrafana.WithReadOnlyHintAnnotation(false),

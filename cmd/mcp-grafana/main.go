@@ -198,6 +198,8 @@ type grafanaConfig struct {
 
 	maxLokiLogLimit int
 
+	dashboardSchema string
+
 	lokiGuardrailMode      string
 	lokiGuardrailMaxBytes  int64
 	lokiGuardrailMaxRange  time.Duration
@@ -283,6 +285,7 @@ func (gc *grafanaConfig) addFlags() {
 	flag.BoolVar(&gc.includeArgsInSpans, "include-args-in-spans", false, "Include tool call arguments in OpenTelemetry spans. Only enable in non-production environments or when arguments are known not to contain PII.")
 	flag.DurationVar(&gc.timeout, "grafana-timeout", mcpgrafana.DefaultGrafanaClientTimeout, "Time limit for requests made by the Grafana client. Accepts Go duration strings, e.g. 10s, 500ms.")
 
+	flag.StringVar(&gc.dashboardSchema, "dashboard-schema", "", "Set to 'v2' to make update_dashboard reject classic v1 bodies that would create a new dashboard when Grafana serves dashboard schema v2. Existing dashboards stay editable in their stored schema. Empty (default) accepts either schema.")
 	flag.BoolVar(&gc.dynamicMultiOrg, "dynamic-multi-org", false, "Allow tool calls to select a Grafana organization per call via an optional orgId argument (org is otherwise fixed at connection startup). Adds an orgId argument to every tool's schema.")
 }
 
@@ -1406,6 +1409,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	if gc.dashboardSchema != "" && gc.dashboardSchema != "v2" {
+		fmt.Fprintf(os.Stderr, "invalid --dashboard-schema %q: must be empty or v2\n", gc.dashboardSchema)
+		os.Exit(2)
+	}
 	if gc.lokiGuardrailMode != mcpgrafana.LokiGuardrailOff {
 		slog.Info("Loki guardrail enabled", "mode", gc.lokiGuardrailMode, "max_bytes", gc.lokiGuardrailMaxBytes, "max_range", gc.lokiGuardrailMaxRange, "on_estimate_failure", gc.lokiGuardrailOnFailure)
 	}
@@ -1428,6 +1435,7 @@ func main() {
 		AllowGrafanaURLOverride:        gc.allowURLOverride,
 		AllowCrossOriginRedirects:      gc.allowCrossOriginRedirects,
 		MaxLokiLogLimit:                gc.maxLokiLogLimit,
+		DashboardSchema:                gc.dashboardSchema,
 		LokiGuardrailMode:              gc.lokiGuardrailMode,
 		LokiGuardrailMaxBytes:          gc.lokiGuardrailMaxBytes,
 		LokiGuardrailMaxRange:          gc.lokiGuardrailMaxRange,
